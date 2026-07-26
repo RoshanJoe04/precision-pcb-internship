@@ -1,0 +1,26 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies needed for OpenCV, PyTorch, Pillow
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PyTorch (CPU version) and Ultralytics (keeps image size around 1.5GB instead of 6GB)
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir ultralytics flask flask-cors pillow
+
+# Copy model weights and the service code
+COPY runs /app/runs
+COPY ai_service.py /app/ai_service.py
+
+# Expose microservice port
+EXPOSE 8000
+
+ENV MODEL_PATH=runs/detect/train-4/weights/best.pt
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "ai_service.py"]
