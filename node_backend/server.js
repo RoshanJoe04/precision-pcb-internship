@@ -4,6 +4,15 @@ const multer = require('multer');
 const axios = require('axios');
 const FormData = require('form-data');
 const mongoose = require('mongoose');
+const fs = require('fs');
+const path = require('path');
+
+// Load secrets from the repo-root .env for local runs (Node >= 20.12).
+// In Docker, docker-compose passes the same variables in, so no file is needed.
+const envPath = path.join(__dirname, '..', '.env');
+if (fs.existsSync(envPath)) {
+    process.loadEnvFile(envPath);
+}
 
 const app = express();
 app.use(cors());
@@ -13,23 +22,27 @@ app.use(express.json());
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
-// MongoDB connection
-const MONGO_URI = "mongodb://roshanjoe39_db_user:RoshanProject2026@ac-bgwxojw-shard-00-00.ircts1g.mongodb.net:27017,ac-bgwxojw-shard-00-01.ircts1g.mongodb.net:27017,ac-bgwxojw-shard-00-02.ircts1g.mongodb.net:27017/?ssl=true&replicaSet=atlas-8yuoh8-shard-0&authSource=admin&appName=roshan";
+// MongoDB connection string comes from the environment, never from source code.
+const MONGO_URI = process.env.MONGO_URI;
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
 
 let isDbConnected = false;
 let inMemoryDbFallback = []; // In-memory fallback for offline environments
 
-mongoose.connect(MONGO_URI)
-  .then(() => {
-      console.log("MongoDB connected.");
-      isDbConnected = true;
-  })
-  .catch(err => {
-      console.error("MongoDB connection failed, using in-memory fallback.", err.message);
-      isDbConnected = false;
-  });
+if (!MONGO_URI) {
+    console.warn("MONGO_URI is not set; using in-memory fallback. Copy .env.example to .env and fill it in.");
+} else {
+    mongoose.connect(MONGO_URI)
+      .then(() => {
+          console.log("MongoDB connected.");
+          isDbConnected = true;
+      })
+      .catch(err => {
+          console.error("MongoDB connection failed, using in-memory fallback.", err.message);
+          isDbConnected = false;
+      });
+}
 
 // Scan log schema
 const ScanLogSchema = new mongoose.Schema({
