@@ -77,12 +77,14 @@ def predict():
         # Log results
         print(f"[predict] {width}x{height} | {len(defects)} defect(s) | {latency_inference:.1f}ms inference", flush=True)
         
-        # Render annotated image
+        # Render annotated image. Results.plot() returns a BGR array (OpenCV
+        # channel order); PIL expects RGB, so flip the channels or every
+        # colour in the output (boxes and board) comes out red/blue swapped.
         annotated_matrix = results[0].plot()
-        
+
         # Encode as JPEG
         output_buffer = io.BytesIO()
-        pil_img = Image.fromarray(annotated_matrix)
+        pil_img = Image.fromarray(annotated_matrix[..., ::-1])
         pil_img.save(output_buffer, format="JPEG")
         
         # Base64 encode for JSON response

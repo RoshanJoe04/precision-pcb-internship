@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+// Backend base URL. Override with VITE_API_URL (e.g. in pcb_frontend/.env)
+// when the API is not on localhost:5000.
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
 // Custom inline SVG Icons for zero-dependency high performance
 const Icons = {
   Scan: () => (
@@ -79,6 +83,14 @@ function App() {
 
   // Refs for auto-scroll
   const consoleEndRef = useRef(null);
+  // Latest backend status for the health-check interval. The interval
+  // callback is created once on mount, so reading `backendOnline` state there
+  // would always see the initial value (null).
+  const backendOnlineRef = useRef(null);
+  const updateBackendOnline = (value) => {
+    backendOnlineRef.current = value;
+    setBackendOnline(value);
+  };
 
   // ── localStorage helpers for offline persistence ──
   const LOCAL_LOGS_KEY = 'pcb_local_logs';
@@ -126,16 +138,16 @@ function App() {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch('http://localhost:5000/api/stats', { signal: controller.signal });
+      const res = await fetch(`${API_BASE}/api/stats`, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) {
-        setBackendOnline(true);
+        updateBackendOnline(true);
         return true;
       }
-      setBackendOnline(false);
+      updateBackendOnline(false);
       return false;
     } catch {
-      setBackendOnline(false);
+      updateBackendOnline(false);
       return false;
     }
   };
@@ -160,7 +172,7 @@ function App() {
 
     // Periodic health check every 30s
     const interval = setInterval(async () => {
-      const wasOnline = backendOnline;
+      const wasOnline = backendOnlineRef.current;
       const nowOnline = await checkBackendHealth();
       if (!wasOnline && nowOnline) {
         addLog('SYS', 'Backend reconnected! Switching to online mode.', 'ai');
@@ -180,7 +192,7 @@ function App() {
   // Fetch past scan archives (online only)
   const fetchHistory = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/logs');
+      const res = await fetch(`${API_BASE}/api/logs`);
       const data = await res.json();
       if (data.success) {
         setHistoryLogs(data.logs);
@@ -194,7 +206,7 @@ function App() {
   // Fetch analytics aggregations (online only)
   const fetchStats = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/stats');
+      const res = await fetch(`${API_BASE}/api/stats`);
       const data = await res.json();
       if (data.success) {
         setStats(data.stats);
@@ -207,13 +219,16 @@ function App() {
 
   // Add line to custom diagnostic console
   const addLog = (tag, message, type = 'sys') => {
-    const elapsed = ((performance.now() - window.performance.timing.navigationStart) / 1000).toFixed(2);
+    // performance.now() is already measured from page load. (Subtracting
+    // performance.timing.navigationStart, an epoch time, gave huge negatives.)
+    const elapsed = (performance.now() / 1000).toFixed(2);
     setConsoleLogs(prev => [...prev, { time: elapsed, tag, message, type }]);
   };
 
   const handleFileChange = (file) => {
     if (file) {
       setSelectedFile(file);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);  // free the previous image
       const url = URL.createObjectURL(file);
       setPreviewUrl(url);
       setResultImage(null);
@@ -278,13 +293,19 @@ function App() {
     formData.append('pcb_image', selectedFile);
 
     try {
-      const response = await fetch('http://localhost:5000/api/scan', {
+      const response = await fetch(`${API_BASE}/api/scan`, {
         method: 'POST',
         body: formData
       });
       
-      const data = await response.json();
-      
+      // A non-JSON error body (proxy error page, etc.) means the backend
+      // answered, so report the HTTP status rather than falling into the
+      // offline path below.
+      const data = await response.json().catch(() => ({
+        success: false,
+        error: `HTTP ${response.status} ${response.statusText}`
+      }));
+
       if (data.success) {
         addLog('AI', `Inference finished. Total defects: ${data.defectCount} | Latency: ${data.latencies.inference_ms}ms`, 'ai');
         addLog('DB', 'Results saved.', 'db');
@@ -301,7 +322,7 @@ function App() {
           filename: selectedFile.name,
           timestamp: new Date().toISOString(),
           defectsDetected: data.defectCount,
-          inferenceTimeMs: data.latencies.inference_ms,
+          inferenceTimeMs: data.latencies.total_ms,
           defects: data.defects.map(d => ({ className: d.class_name, confidence: d.confidence }))
         };
         const updated = [localRecord, ...getLocalLogs()].slice(0, 100);
@@ -311,11 +332,11 @@ function App() {
         fetchHistory();
         fetchStats();
       } else {
-        addLog('SYS', `Scan failed: ${data.error}`, 'err');
+        addLog('SYS', `Scan failed: ${data.error || data.message || 'unknown error'}`, 'err');
       }
     } catch (err) {
       // ── OFFLINE FALLBACK: record the attempt locally ──
-      setBackendOnline(false);
+      updateBackendOnline(false);
       addLog('SYS', 'Backend unreachable — switching to local mode.', 'err');
       addLog('SYS', 'Image loaded. AI inference requires the backend service.', 'err');
       addLog('SYS', 'Recording scan attempt locally (no defect detection).', 'err');
@@ -354,7 +375,7 @@ function App() {
     
     if (backendOnline && !id.startsWith('local_')) {
       try {
-        const res = await fetch(`http://localhost:5000/api/logs/${id}`, {
+        const res = await fetch(`${API_BASE}/api/logs/${id}`, {
           method: 'DELETE'
         });
         const data = await res.json();
@@ -382,7 +403,7 @@ function App() {
     
     if (backendOnline) {
       try {
-        const res = await fetch('http://localhost:5000/api/logs', {
+        const res = await fetch(`${API_BASE}/api/logs`, {
           method: 'DELETE'
         });
         const data = await res.json();
@@ -547,6 +568,7 @@ function App() {
                       className="btn btn-danger"
                       onClick={() => {
                         setSelectedFile(null);
+                        if (previewUrl) URL.revokeObjectURL(previewUrl);
                         setPreviewUrl(null);
                         setResultImage(null);
                         setDefects([]);

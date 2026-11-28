@@ -20,7 +20,9 @@ app.use(express.json());
 
 // File upload buffer
 const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
+// Cap uploads: memoryStorage buffers the whole file in RAM, so an unbounded
+// upload can exhaust the process's memory.
+const upload = multer({ storage: storage, limits: { fileSize: 20 * 1024 * 1024 } });
 
 // MongoDB connection string comes from the environment, never from source code.
 const MONGO_URI = process.env.MONGO_URI;
@@ -140,8 +142,16 @@ app.post('/api/scan', upload.single('pcb_image'), async (req, res) => {
         }
 
     } catch (networkError) {
+        // axios throws for non-2xx too: if the AI service answered (e.g. 400
+        // for a bad image, 500 for an inference error), pass its message on
+        // instead of claiming the service is unreachable.
+        const upstream = networkError.response && networkError.response.data;
+        if (upstream && upstream.error) {
+            console.error("AI service returned an error:", upstream.error);
+            return res.status(502).json({ success: false, error: upstream.error });
+        }
         console.error("Communications failure with Python backend:", networkError.message);
-        return res.status(500).json({ success: false, message: "AI microservice pipeline currently unreachable." });
+        return res.status(502).json({ success: false, error: "AI microservice pipeline currently unreachable." });
     }
 });
 
@@ -192,8 +202,13 @@ app.get('/api/stats', async (req, res) => {
                 });
             } catch (dbErr) {
                 console.error("DB aggregation failed, defaulting to in-memory stats calculation:", dbErr.message);
-                // Trigger fallback calculations below
-                totalScans = 0; 
+                // Reset everything a partially-completed query may have filled
+                // in, otherwise the in-memory pass below adds on top of stale
+                // DB numbers (e.g. cleanScans > totalScans).
+                totalScans = 0;
+                cleanScans = 0;
+                totalLatency = 0;
+                Object.keys(defectCounts).forEach(k => { defectCounts[k] = 0; });
             }
         }
 
@@ -282,4 +297,17 @@ function round(val, places) {
     return Math.round(val * factor) / factor;
 }
 
-app.listen(5000, () => console.log("MERN Router running actively on Port 5000"));
+// JSON error handler (e.g. multer's LIMIT_FILE_SIZE). Express's default
+// handler answers with an HTML page, which the frontend cannot parse.
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ success: false, error: err.message });
+    }
+    console.error("Unhandled error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error." });
+});
+
+// Honour PORT (set in .env.example and the Dockerfile) instead of ignoring it.
+const PORT = Number(process.env.PORT) || 5000;
+app.listen(PORT, () => console.log(`MERN Router running actively on Port ${PORT}`));
